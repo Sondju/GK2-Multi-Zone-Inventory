@@ -6,8 +6,7 @@ using System.Reflection;
 namespace MultiZoneInventory
 {
     // Расширяет зрение зомби-доставщика: временно подмешивает склады чужих зон
-    // в multiInventoryWgoDatas на время выполнения патченных методов.
-    /*static class HaulerVisionPatch
+    static class HaulerVisionPatch
     {
         static readonly FieldInfo WgoListField =
             AccessTools.Field(typeof(WorldZoneData), "multiInventoryWgoDatas");
@@ -22,10 +21,32 @@ namespace MultiZoneInventory
             return field != null ? field.GetValue(wgo) as WorldZoneData : null;
         }
 
-        // Подходит и для WorldZoneData (сама зона), и для ZombieWgoData (зона через WorldZoneData)
+        // Проверяем, является ли WgoData настоящим сундуком/складом, а не деревом или кустом
+        private static bool IsRealStorage(WgoData wgo)
+        {
+            if (wgo == null || wgo.Definition == null) return false;
+
+            // 1. Проверяем строковые ID и группы. В Graveyard Keeper склады имеют четкие wgoGroup
+            string group = wgo.Definition.wgoGroup?.ToLower() ?? "";
+            string id = wgo.id?.ToLower() ?? "";
+
+            // Исключаем природные объекты, деревья, грядки, NPC и разбираемые чертежи
+            if (id.Contains("tree") || id.Contains("bush") || id.Contains("stone_quarry") ||
+                group.Contains("nature") || group.Contains("npc") || group.Contains("crop"))
+            {
+                return false;
+            }
+
+            // 2. Самый надежный маркер: игра разрешает открывать этот объект в мультиинвентарях игрока
+            // и размер его инвентаря больше нуля
+            return wgo.Definition.OpenInMultiInventory && wgo.Definition.inventorySize > 0;
+        }
+
         public static void Prefix(object __instance, out List<WgoData> __state)
         {
             __state = null;
+
+            if (__instance == null || WgoListField == null) return;
 
             WorldZoneData zone = __instance as WorldZoneData;
             if (zone == null)
@@ -33,19 +54,20 @@ namespace MultiZoneInventory
                 var zwd = AccessTools.Property(__instance.GetType(), "WorldZoneData");
                 zone = zwd?.GetValue(__instance) as WorldZoneData;
             }
-            if (zone == null || WgoListField == null) return;
+            if (zone == null) return;
 
             var list = (List<WgoData>)WgoListField.GetValue(zone);
             if (list == null) return;
 
+            // Собираем ТОЛЬКО реальные склады из нашего глобального кэша, которые находятся в чужих зонах
             var foreign = WgoInventoryCache.AllWgoDatas
-                .Where(w => w != null && GetZone(w) != zone && !list.Contains(w))
+                .Where(w => w != null && IsRealStorage(w) && GetZone(w) != zone && !list.Contains(w))
                 .ToList();
 
             if (foreign.Count > 0)
             {
-                __state = new List<WgoData>(list); // сохраняем оригинал
-                list.AddRange(foreign);            // подмешиваем чужие сундуки
+                __state = new List<WgoData>(list); // сохраняем ванильный оригинал списка зоны
+                list.AddRange(foreign);            // подмешиваем сундуки со всего мира
             }
         }
 
@@ -61,7 +83,7 @@ namespace MultiZoneInventory
             }
             if (zone == null) return;
 
-            WgoListField.SetValue(zone, __state);  // вернули список как было
+            WgoListField.SetValue(zone, __state);  // возвращаем список зоны в исходное состояние
         }
-    }*/
+    }
 }

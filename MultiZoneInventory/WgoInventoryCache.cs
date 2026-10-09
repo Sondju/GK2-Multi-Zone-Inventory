@@ -1,151 +1,153 @@
 ﻿using HarmonyLib;
 using System;
 using System.Collections.Generic;
-using static MultiZoneInventory.MainPlugin;
 
-public static class WgoInventoryCache
+namespace MultiZoneInventory
 {
-    private static readonly AccessTools.FieldRef<Inventory, object> GetInventoryItem =
-    AccessTools.FieldRefAccess<Inventory, object>("inventoryItem");
-    private static readonly List<Inventory> _inventories = new List<Inventory>();
-    private static readonly List<WgoData> _wgoDatas = new List<WgoData>();
-    private static readonly Dictionary<string, int> _totals = new Dictionary<string, int>();
-
-    private static bool _dirty = true;
-
-    public static IEnumerable<Inventory> All => _inventories;
-    public static IEnumerable<WgoData> AllWgoDatas => _wgoDatas;
-
-    // Автоматически вызывается из Postfix патча AddWgoDataToCache
-    public static void HandleWgoAdded(WgoData wgo)
+    public static class WgoInventoryCache
     {
-        if (wgo == null || wgo.Definition == null || wgo.Inventory == null) return;
+        private static readonly AccessTools.FieldRef<Inventory, object> GetInventoryItem =
+        AccessTools.FieldRefAccess<Inventory, object>("inventoryItem");
+        private static readonly List<Inventory> _inventories = new List<Inventory>();
+        private static readonly List<WgoData> _wgoDatas = new List<WgoData>();
+        private static readonly Dictionary<string, int> _totals = new Dictionary<string, int>();
 
-        // Фильтруем контейнеры: размер > 0 и разрешено отображение в мультиинвентарях
-        if (wgo.Definition.inventorySize <= 0 || !wgo.Definition.OpenInMultiInventory) return;
-        if (_inventories.Contains(wgo.Inventory)) return;
+        private static bool _dirty = true;
 
-        _inventories.Add(wgo.Inventory);
-        _wgoDatas.Add(wgo);
+        public static IEnumerable<Inventory> All => _inventories;
+        public static IEnumerable<WgoData> AllWgoDatas => _wgoDatas;
 
-        // Подписываемся на динамическое изменение предметов, чтобы инвалидировать кэш сумм
-        wgo.Inventory.OnItemsAdd += OnAnyChange;
-        wgo.Inventory.OnItemsRemove += OnAnyChange;
-
-        _dirty = true;
-        Log.LogMessage($"[MZI] Инвентарь добавлен в глобальный стек: {wgo.id} (UID: {wgo.UniqueId})");
-    }
-
-    // Автоматически вызывается из Postfix патча RemoveWgoDataFromCache
-    public static void HandleWgoRemoved(WgoData wgo)
-    {
-        if (wgo == null || wgo.Inventory == null) return;
-
-        if (_inventories.Remove(wgo.Inventory))
+        // Автоматически вызывается из Postfix патча AddWgoDataToCache
+        public static void HandleWgoAdded(WgoData wgo)
         {
-            _wgoDatas.Remove(wgo);
+            if (wgo == null || wgo.Definition == null || wgo.Inventory == null) return;
 
-            wgo.Inventory.OnItemsAdd -= OnAnyChange;
-            wgo.Inventory.OnItemsRemove -= OnAnyChange;
+            // Фильтруем контейнеры: размер > 0 и разрешено отображение в мультиинвентарях
+            if (wgo.Definition.inventorySize <= 0 || !wgo.Definition.OpenInMultiInventory) return;
+            if (_inventories.Contains(wgo.Inventory)) return;
+
+            _inventories.Add(wgo.Inventory);
+            _wgoDatas.Add(wgo);
+
+            // Подписываемся на динамическое изменение предметов, чтобы инвалидировать кэш сумм
+            wgo.Inventory.OnItemsAdd += OnAnyChange;
+            wgo.Inventory.OnItemsRemove += OnAnyChange;
 
             _dirty = true;
-            Log.LogMessage($"[MZI] Инвентарь удален из глобального стека: {wgo.id}");
+            MainPlugin.Log.LogMessage($"[MZI] Инвентарь добавлен в глобальный стек: {wgo.id} (UID: {wgo.UniqueId})");
         }
-    }
 
-    // Очистка кэша при перезагрузке сохранения или выходе в меню
-    public static void Clear()
-    {
-        foreach (var inv in _inventories)
+        // Автоматически вызывается из Postfix патча RemoveWgoDataFromCache
+        public static void HandleWgoRemoved(WgoData wgo)
         {
-            if (inv != null)
+            if (wgo == null || wgo.Inventory == null) return;
+
+            if (_inventories.Remove(wgo.Inventory))
             {
-                inv.OnItemsAdd -= OnAnyChange;
-                inv.OnItemsRemove -= OnAnyChange;
+                _wgoDatas.Remove(wgo);
+
+                wgo.Inventory.OnItemsAdd -= OnAnyChange;
+                wgo.Inventory.OnItemsRemove -= OnAnyChange;
+
+                _dirty = true;
+                MainPlugin.Log.LogMessage($"[MZI] Инвентарь удален из глобального стека: {wgo.id}");
             }
         }
-        _inventories.Clear();
-        _wgoDatas.Clear();
-        _totals.Clear();
-        _dirty = true;
-        Log.LogWarning("[MZI] Глобальный кэш инвентарей полностью сброшен.");
-    }
 
-    private static void OnAnyChange(List<Item> _)
-    {
-        _dirty = true;
-    }
-
-    public static int GetTotal(string itemId)
-    {
-        if (_dirty)
+        // Очистка кэша при перезагрузке сохранения или выходе в меню
+        public static void Clear()
         {
-            Recount();
-        }
-        return _totals.TryGetValue(itemId, out int n) ? n : 0;
-    }
-
-    private static void Recount()
-    {
-        _totals.Clear();
-        foreach (Inventory inv in _inventories)
-        {
-            if (inv == null) continue;
-
-            try
+            foreach (var inv in _inventories)
             {
-                // 1. Извлекаем приватный объект inventoryItem
-                object invItem = GetInventoryItem(inv);
-                if (invItem == null) continue;
-
-                // 2. Достаем из него коллекцию под-инвентарей. 
-                // Как видно из вашего декомпилятора (invItem.Inventory), свойство называется "Inventory"
-                var subInventories = AccessTools.Property(invItem.GetType(), "Inventory")?.GetValue(invItem) as System.Collections.IEnumerable;
-                if (subInventories == null) continue;
-
-                // 3. Обходим все вложенные инвентари в этом сундуке
-                foreach (var subInv in subInventories)
+                if (inv != null)
                 {
-                    if (subInv == null) continue;
+                    inv.OnItemsAdd -= OnAnyChange;
+                    inv.OnItemsRemove -= OnAnyChange;
+                }
+            }
+            _inventories.Clear();
+            _wgoDatas.Clear();
+            _totals.Clear();
+            _dirty = true;
+            MainPlugin.Log.LogWarning("[MZI] Глобальный кэш инвентарей полностью сброшен.");
+        }
 
-                    // В зависимости от архитектуры игры, subInv — это либо список Item, либо еще один уровень Inventory.
-                    // Судя по декомпилятору: `foreach (Item item in this.inventoryItem.Inventory)` — subInv является типом Item!
-                    // А у Item, как мы видим из кода сумок, есть свое свойство `.Inventory` или `.Data.Inventory`.
-                    if (subInv is Item itemInSlot)
+        private static void OnAnyChange(List<Item> _)
+        {
+            _dirty = true;
+        }
+
+        public static int GetTotal(string itemId)
+        {
+            if (_dirty)
+            {
+                Recount();
+            }
+            return _totals.TryGetValue(itemId, out int n) ? n : 0;
+        }
+
+        private static void Recount()
+        {
+            _totals.Clear();
+            foreach (Inventory inv in _inventories)
+            {
+                if (inv == null) continue;
+
+                try
+                {
+                    // 1. Извлекаем приватный объект inventoryItem
+                    object invItem = GetInventoryItem(inv);
+                    if (invItem == null) continue;
+
+                    // 2. Достаем из него коллекцию под-инвентарей. 
+                    // Как видно из вашего декомпилятора (invItem.Inventory), свойство называется "Inventory"
+                    var subInventories = AccessTools.Property(invItem.GetType(), "Inventory")?.GetValue(invItem) as System.Collections.IEnumerable;
+                    if (subInventories == null) continue;
+
+                    // 3. Обходим все вложенные инвентари в этом сундуке
+                    foreach (var subInv in subInventories)
                     {
-                        // Считаем сам предмет в слоте
-                        ProcessItem(itemInSlot);
+                        if (subInv == null) continue;
 
-                        // Если это сумка внутри сундука (как Farmer's bag), заглядываем внутрь нее:
-                        if (itemInSlot.IsBag)
+                        // В зависимости от архитектуры игры, subInv — это либо список Item, либо еще один уровень Inventory.
+                        // Судя по декомпилятору: `foreach (Item item in this.inventoryItem.Inventory)` — subInv является типом Item!
+                        // А у Item, как мы видим из кода сумок, есть свое свойство `.Inventory` или `.Data.Inventory`.
+                        if (subInv is Item itemInSlot)
                         {
-                            var bagItems = AccessTools.Property(typeof(Item), "Inventory")?.GetValue(itemInSlot) as IEnumerable<Item>;
-                            if (bagItems != null)
+                            // Считаем сам предмет в слоте
+                            ProcessItem(itemInSlot);
+
+                            // Если это сумка внутри сундука (как Farmer's bag), заглядываем внутрь нее:
+                            if (itemInSlot.IsBag)
                             {
-                                foreach (var bagItem in bagItems)
+                                var bagItems = AccessTools.Property(typeof(Item), "Inventory")?.GetValue(itemInSlot) as IEnumerable<Item>;
+                                if (bagItems != null)
                                 {
-                                    ProcessItem(bagItem);
+                                    foreach (var bagItem in bagItems)
+                                    {
+                                        ProcessItem(bagItem);
+                                    }
                                 }
                             }
                         }
                     }
                 }
+                catch (Exception e)
+                {
+                    MainPlugin.Log.LogError($"[MZI] Ошибка подсчета предметов в сундуке: {e.Message}\n{e.StackTrace}");
+                }
             }
-            catch (Exception e)
-            {
-                Log.LogError($"[MZI] Ошибка подсчета предметов в сундуке: {e.Message}\n{e.StackTrace}");
-            }
+            _dirty = false;
         }
-        _dirty = false;
-    }
 
-    // Вспомогательный метод для чистоты кода
-    private static void ProcessItem(Item item)
-    {
-        if (item == null || string.IsNullOrEmpty(item.id) || item.IsEmpty)
-            return;
+        // Вспомогательный метод для чистоты кода
+        private static void ProcessItem(Item item)
+        {
+            if (item == null || string.IsNullOrEmpty(item.id) || item.IsEmpty)
+                return;
 
-        _totals.TryGetValue(item.id, out int currentCount);
-        _totals[item.id] = currentCount + item.Count;
+            _totals.TryGetValue(item.id, out int currentCount);
+            _totals[item.id] = currentCount + item.Count;
+        }
     }
 }
