@@ -1,0 +1,92 @@
+<Project Sdk="Microsoft.NET.Sdk">
+	<PropertyGroup>
+		<TargetFramework>net472</TargetFramework>
+		<AssemblyName>MultiZoneInventoryFramework</AssemblyName>
+		<RootNamespace>MultiZoneInventoryFramework</RootNamespace>
+		<LangVersion>latest</LangVersion>
+		<Nullable>disable</Nullable>
+		
+		<!-- Не копируем зависимости в выходную папку -->
+		<CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+		
+		<!-- BepInEx -->
+		<DefineConstants>$(DefineConstants);BIE_API_V5</DefineConstants>
+	</PropertyGroup>
+	
+	<PropertyGroup>
+		<!-- Game Path -->
+		<GameDir>F:\GAMES\Graveyard Keeper 2</GameDir>
+		<!-- Managed Path -->
+		<ManagedDir>$(GameDir)\GraveyardKeeper2_Data\Managed</ManagedDir>
+		<!-- МО2 Instance Path -->
+		<MO2ModsDir>F:\_Game Profiles_\Graveyard Keeper 2\mods</MO2ModsDir>
+	</PropertyGroup>
+	
+	<ItemGroup>
+	  <ProjectReference Include="..\MultiZoneInventory\MultiZoneInventory.csproj" />
+	</ItemGroup>
+	
+	<ItemGroup>
+		<!-- BepInEx -->
+		<Reference Include="BepInEx">
+			<HintPath>$(GameDir)\BepInEx\core\BepInEx.dll</HintPath>
+			<Private>false</Private>
+		</Reference>
+		<Reference Include="0Harmony">
+			<HintPath>$(GameDir)\BepInEx\core\0Harmony.dll</HintPath>
+			<Private>false</Private>
+		</Reference>
+		
+		<!-- Game assemblies -->
+		<Reference Include="Assembly-CSharp">
+			<HintPath>$(ManagedDir)\Assembly-CSharp.dll</HintPath>
+			<Private>false</Private>
+		</Reference>
+		<Reference Include="FlowCanvas">
+		  <HintPath>$(ManagedDir)\FlowCanvas.dll</HintPath>
+		</Reference>
+		<Reference Include="GK2.Framework">
+		  <HintPath>F:\_Game Profiles_\Graveyard Keeper 2\mods\GK2 Mod Framework\plugins\GK2.Framework.dll</HintPath>
+		</Reference>
+		<Reference Include="LazyBearTechnology">
+			<HintPath>$(ManagedDir)\LazyBearTechnology.dll</HintPath>
+			<Private>false</Private>
+		</Reference>
+		<Reference Include="ParadoxNotion">
+		  <HintPath>$(ManagedDir)\ParadoxNotion.dll</HintPath>
+		</Reference>
+		<Reference Include="Sirenix.Serialization">
+		  <HintPath>$(ManagedDir)\Sirenix.Serialization.dll</HintPath>
+		</Reference>
+		
+		<!-- Unity -->
+		<Reference Include="UnityEngine">
+			<HintPath>$(ManagedDir)\UnityEngine.dll</HintPath>
+			<Private>false</Private>
+		</Reference>
+		<Reference Include="UnityEngine.CoreModule">
+			<HintPath>$(ManagedDir)\UnityEngine.CoreModule.dll</HintPath>
+			<Private>false</Private>
+		</Reference>
+		<Reference Include="UnityEngine.IMGUIModule">
+		  <HintPath>$(ManagedDir)\UnityEngine.IMGUIModule.dll</HintPath>
+		</Reference>
+	</ItemGroup>
+	
+	<!-- Автоматическое копирование скомпилированного файла мода в плагины игры -->
+	<Target Name="PostBuild" AfterTargets="PostBuildEvent">
+		<PropertyGroup>
+			<!-- 1. МАГИЯ ЛЕНИ: Отрезаем слово "Framework" от имени сборки, если оно там есть -->
+			<CleanName>$([System.Text.RegularExpressions.Regex]::Replace($(AssemblyName), 'Framework$', ''))</CleanName>
+			
+			<!-- 2. Расставляем пробелы перед заглавными буквами в очищенном имени -->
+			<ModFolderName>$([System.Text.RegularExpressions.Regex]::Replace($(CleanName), '(\B[A-Z])', ' $1'))</ModFolderName>
+			
+			<!-- 3. Формируем правильные пути для деплоя -->
+			<TargetModPath>$(MO2ModsDir)\$(ModFolderName)\plugins\$(CleanName)</TargetModPath>
+		</PropertyGroup>
+
+		<!-- Копируем саму .dll текущего проекта в plugins -->
+		<Copy SourceFiles="$(OutputPath)$(AssemblyName).dll" DestinationFolder="$(TargetModPath)" SkipUnchangedFiles="true" />
+	</Target>
+</Project>

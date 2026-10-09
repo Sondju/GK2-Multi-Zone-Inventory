@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="MultiZoneInventory\MultiZoneInventory.csproj" />
+  <Project Path="MultiZoneInventoryFramework\MultiZoneInventoryFramework.csproj">
+    <BuildDependency Project="MultiZoneInventory\MultiZoneInventory.csproj" />
+  </Project>
+</Solution>
