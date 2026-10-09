@@ -36,10 +36,13 @@ namespace MultiZoneInventory
             var patchTypes = new[]
             {
                 typeof(MI_Ctor_PlayerPatch),
-                typeof(ItemHasItemQuantityPatch),
-                typeof(NewStoragePatch),
+                //typeof(ItemHasItemQuantityPatch),
+                typeof(ItemGetTotalCountUiPatch),
                 typeof(MziDataCtorPatch),
                 typeof(ForceAutoCraftPatch),
+                typeof(WgoDataCacheAddPatch),
+                typeof(WgoDataCacheRemovePatch),
+                typeof(GameSessionClearPatch),
             };
 
             foreach (var pt in patchTypes)
@@ -85,7 +88,7 @@ namespace MultiZoneInventory
                     typeof(CrafterDirectStartPatch), nameof(CrafterDirectStartPatch.Prefix))));
 
             // 5. Создаём кэш инвентарей
-            WgoInventoryCache.Rebuild();
+            //WgoInventoryCache.Rebuild();
         }
 
         public static void PatchCraftableImplementations(Harmony harmony)
@@ -195,14 +198,89 @@ namespace MultiZoneInventory
             }
         }
 
-        // ===== Новые склады, построенные в игре =====
-        [HarmonyPatch(typeof(WorldData), nameof(WorldData.AddWgoData),
-            new[] { typeof(WgoData) })]
-        static class NewStoragePatch
+        // ===== Синхронизация отображения цифр на плашках (диалоги, крафт, улучшения) =====
+        [HarmonyPatch(typeof(Item), nameof(Item.GetTotalCountInInventory), new[] { typeof(string), typeof(Item), typeof(bool) })]
+        static class ItemGetTotalCountUiPatch
         {
-            static void Postfix(WgoData data)
+            // Создаем быстрый указатель для чтения приватного поля inventoryItem из класса Inventory
+            private static readonly AccessTools.FieldRef<Inventory, Item> GetPlayerInventoryItem =
+                AccessTools.FieldRefAccess<Inventory, Item>("inventoryItem");
+
+            public static void Postfix(Item __instance, ref int __result, string itemId, Item ignoredBag, bool ignoreAllBags)
             {
-                if (data != null) WgoInventoryCache.RegisterWgo(data);
+                if (string.IsNullOrEmpty(itemId)) return;
+
+                // 1. Проверяем, чтоPlayerData и его инвентарь проинициализированы
+                if (MainGame.PlayerData != null && MainGame.PlayerData.Inventory != null)
+                {
+                    // 2. Безопасно достаем приватный объект Item, который скрыт внутри инвентаря игрока
+                    Item playerInventoryItem = GetPlayerInventoryItem(MainGame.PlayerData.Inventory);
+
+                    // 3. Теперь мы сравниваем два объекта одного типа (Item и Item)
+                    if (__instance == playerInventoryItem)
+                    {
+                        // Получаем общее количество ресурсов из нашего глобального реактивного кэша сундуков
+                        int cachedGlobal = WgoInventoryCache.GetTotal(itemId);
+
+                        // Если на глобальном складе предметов больше, подставляем это число для UI
+                        if (cachedGlobal > __result)
+                        {
+                            __result = cachedGlobal;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Патч на добавление в ванильный кэш
+        [HarmonyPatch(typeof(WgoDataCache), nameof(WgoDataCache.AddWgoDataToCache))]
+        static class WgoDataCacheAddPatch
+        {
+            static void Postfix(WgoData wgoData)
+            {
+                try
+                {
+                    WgoInventoryCache.HandleWgoAdded(wgoData);
+                }
+                catch (Exception e)
+                {
+                    MainPlugin.Log.LogError($"[MZI] Ошибка обработки AddWgoDataToCache: {e.Message}");
+                }
+            }
+        }
+
+        // Патч на удаление из ванильного кэша
+        [HarmonyPatch(typeof(WgoDataCache), nameof(WgoDataCache.RemoveWgoDataFromCache))]
+        static class WgoDataCacheRemovePatch
+        {
+            static void Postfix(WgoData wgoData)
+            {
+                try
+                {
+                    WgoInventoryCache.HandleWgoRemoved(wgoData);
+                }
+                catch (Exception e)
+                {
+                    MainPlugin.Log.LogError($"[MZI] Ошибка обработки RemoveWgoDataFromCache: {e.Message}");
+                }
+            }
+        }
+
+        // Патч очистки при выходе в главное меню или загрузке
+        [HarmonyPatch(typeof(MainGame), "ResetAllGameData")]
+        static class GameSessionClearPatch
+        {
+            static void Postfix()
+            {
+                try
+                {
+                    WgoInventoryCache.Clear();
+                    MainPlugin.Log.LogWarning("[MZI] Метод ResetAllGameData выполнен. Глобальный кэш инвентарей успешно очищен.");
+                }
+                catch (Exception e)
+                {
+                    MainPlugin.Log.LogError($"[MZI] Ошибка очистки кэша в ResetAllGameData Postfix: {e.Message}");
+                }
             }
         }
 
@@ -232,19 +310,79 @@ namespace MultiZoneInventory
         [HarmonyPatch(typeof(CraftComponent), "IsAutoCraftable", MethodType.Getter)]
         public static class ForceAutoCraftPatch
         {
+            // --- НАШ БЕЛЫЙ СПИСОК ВЕРСТАКОВ ---
+            // Автокрафт сработает ТОЛЬКО на объектах, чьи ID или wgoGroup находятся здесь.
+            // Сюда вы будете вносить ID производственных станций из Unity Explorer.
+            private static readonly HashSet<string> AllowedAutoCrafterIds = new HashSet<string>
+            {
+                "saw_bench",
+                "furnace_1",
+                "furnace_2"
+            };
+
             public static bool Prefix(CraftComponent __instance, ref bool __result)
             {
-                var current = __instance.CurrentCraftElement;
-                if (current != null && (
-                    current.Def.isAutopsyCraft || // Исключаем извлечение основных органов
-                    current.Def.isPocketExtractCraft || // Исключаем извлечение вторичных органов
-                    current.Def.isFuelCraft || // Исключаем создание топлива
-                    current.Def.isStarCraft// Исключаем звёздные крафты (тут под вопросом, потому что без понятия что это)
-                ))
-                    return true; // Всё что выше оставляем ванили (ручное управление)
+                if (__instance == null || __instance.CraftableObject == null) return true;
 
-                __result = true; // Остальному включаем автокрафт, как у куба
-                return false;
+                WgoData wgoData = null;
+
+                try
+                {
+                    // Используем цепочку связей игры: CraftComponent -> CraftableObject -> Worker -> AttachedWgoData
+                    var zombieWorker = __instance.CraftableObject.CraftableAttachedWorker as ZombieWgoData;
+                    if (zombieWorker != null)
+                    {
+                        wgoData = zombieWorker.AttachedWgoData;
+                    }
+                    else
+                    {
+                        // Приводим к MemberInfo, чтобы оператор ?? сработал корректно
+                        var objDataField = (MemberInfo)AccessTools.Field(__instance.CraftableObject.GetType(), "data")
+                                           ?? (MemberInfo)AccessTools.Field(__instance.CraftableObject.GetType(), "wgoData")
+                                           ?? (MemberInfo)AccessTools.Property(__instance.CraftableObject.GetType(), "WgoData");
+
+                        if (objDataField != null)
+                        {
+                            // Извлекаем значение в зависимости от того, поле это или свойство
+                            wgoData = objDataField switch
+                            {
+                                FieldInfo f => f.GetValue(__instance.CraftableObject) as WgoData,
+                                PropertyInfo p => p.GetValue(__instance.CraftableObject) as WgoData,
+                                _ => null
+                            };
+                        }
+                    }
+                }
+                catch (Exception e)
+                {
+                    Log.LogError($"[MZI] Не удалось извлечь WgoData верстака: {e.Message}");
+                }
+
+                // Если не смогли определить верстак — отдаем управление ванили
+                if (wgoData == null) return true;
+
+                // Проверяем, входит ли верстак в наш белый список
+                bool isAllowed = AllowedAutoCrafterIds.Contains(wgoData.id) ||
+                                 (wgoData.Definition != null && AllowedAutoCrafterIds.Contains(wgoData.Definition.wgoGroup));
+
+                if (isAllowed)
+                {
+                    var current = __instance.CurrentCraftElement;
+                    if (current == null || current.Def == null) return true;
+
+                    // Запрещаем автокрафт для системных вещей (заправка топливом)
+                    if (current.Def.isFuelCraft)
+                    {
+                        return true;
+                    }
+
+                    // Включаем автоматику!
+                    __result = true;
+                    return false; // Блокируем оригинал
+                }
+
+                // Все остальные объекты (включая разбираемые сундуки) работают в ручном режиме
+                return true;
             }
         }
     }
